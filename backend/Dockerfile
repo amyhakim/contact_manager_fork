@@ -16,11 +16,19 @@ RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
 # Use production PHP configuration
 RUN mv "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini"
 
-# Disable conflicting MPM modules first
-RUN a2dismod mpm_event mpm_worker || true
+# Fix MPM conflict by manually removing all MPM symlinks
+RUN rm -f /etc/apache2/mods-enabled/mpm_* \
+    && rm -f /etc/apache2/mods-enabled/mpm_*.conf \
+    && rm -f /etc/apache2/mods-enabled/mpm_*.load
 
-# Enable prefork MPM and required modules
+# Enable only prefork MPM and required modules
 RUN a2enmod mpm_prefork rewrite headers
+
+# Verify MPM configuration and debug
+RUN echo "=== MPM Configuration Debug ===" \
+    && ls -la /etc/apache2/mods-enabled/mpm_* || echo "No MPM modules found" \
+    && apache2ctl -M | grep mpm || echo "No MPM modules loaded" \
+    && echo "=== End MPM Debug ==="
 
 # Set working directory
 WORKDIR /var/www/html
