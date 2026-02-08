@@ -1,23 +1,36 @@
-FROM php:8.2-cli
+FROM ubuntu:22.04
 
-# Install system dependencies including Apache, PHP-FPM, and supervisor
+# Set environment variables to avoid interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# Install system dependencies and add PHP repository
 RUN apt-get update && apt-get install -y \
-    libzip-dev \
+    software-properties-common \
+    curl \
+    wget \
     unzip \
+    && add-apt-repository ppa:ondrej/php -y \
+    && apt-get update \
+    && apt-get install -y \
+    apache2 \
+    php8.2 \
+    php8.2-fpm \
+    php8.2-cli \
+    php8.2-common \
+    php8.2-mysql \
+    php8.2-zip \
+    php8.2-gd \
+    php8.2-mbstring \
+    php8.2-curl \
+    php8.2-xml \
+    php8.2-bcmath \
+    libzip-dev \
     libpng-dev \
     libjpeg-dev \
     libfreetype6-dev \
-    apache2 \
-    php8.2-fpm \
     supervisor \
     && rm -rf /var/lib/apt/lists/*
-
-# Install PHP extensions
-RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
-    && docker-php-ext-install -j$(nproc) gd zip pdo pdo_mysql
-
-# Use production PHP configuration
-RUN mv "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini"
 
 # Configure Apache modules
 RUN a2enmod rewrite headers proxy proxy_fcgi \
@@ -31,10 +44,10 @@ RUN sed -i 's/listen = \/run\/php\/php8.2-fpm.sock/listen = 127.0.0.1:9000/' /et
     && echo "pm.min_spare_servers = 2" >> /etc/php/8.2/fpm/pool.d/www.conf \
     && echo "pm.max_spare_servers = 4" >> /etc/php/8.2/fpm/pool.d/www.conf
 
-# Configure PHP error logging for Railway
-RUN echo "log_errors = On" >> /usr/local/etc/php/php.ini \
-    && echo "error_log = /proc/self/fd/2" >> /usr/local/etc/php/php.ini \
-    && echo "display_errors = Off" >> /usr/local/etc/php/php.ini
+# Configure PHP for production
+RUN sed -i 's/display_errors = On/display_errors = Off/' /etc/php/8.2/fpm/php.ini \
+    && sed -i 's/;log_errors = On/log_errors = On/' /etc/php/8.2/fpm/php.ini \
+    && sed -i 's/;error_log = php_errors.log/error_log = \/proc\/self\/fd\/2/' /etc/php/8.2/fpm/php.ini
 
 # Configure Apache for Railway (dynamic port support)
 RUN sed -i 's/Listen 80/Listen ${PORT:-80}/' /etc/apache2/ports.conf \
@@ -58,32 +71,6 @@ COPY apache-api.conf /etc/apache2/conf-available/api.conf
 
 # Enable the API configuration
 RUN a2enconf api
-
-# Create supervisor configuration
-RUN cat > /etc/supervisor/conf.d/supervisord.conf << 'EOF'
-[supervisord]
-nodaemon=true
-user=root
-
-[program:php-fpm]
-command=/usr/sbin/php-fpm8.2 --nodaemonize --fpm-config /etc/php/8.2/fpm/php-fpm.conf
-autostart=true
-autorestart=true
-stderr_logfile=/dev/stderr
-stderr_logfile_maxbytes=0
-stdout_logfile=/dev/stdout
-stdout_logfile_maxbytes=0
-user=root
-
-[program:apache2]
-command=/usr/local/bin/start-services
-autostart=true
-autorestart=true
-stderr_logfile=/dev/stderr
-stderr_logfile_maxbytes=0
-stdout_logfile=/dev/stdout
-stdout_logfile_maxbytes=0
-EOF
 
 # Set proper permissions
 RUN chown -R www-data:www-data /var/www/html \
@@ -133,5 +120,5 @@ RUN chmod +x /usr/local/bin/start-services
 # Expose port (Railway will override this)
 EXPOSE 80
 
-# Start services directly (simpler than supervisor for this case)
+# Start services
 CMD ["/usr/local/bin/start-services"]
