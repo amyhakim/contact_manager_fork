@@ -16,8 +16,11 @@ RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
 # Use production PHP configuration
 RUN mv "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini"
 
-# Enable Apache modules
-RUN a2enmod rewrite headers
+# Disable conflicting MPM modules first
+RUN a2dismod mpm_event mpm_worker || true
+
+# Enable prefork MPM and required modules
+RUN a2enmod mpm_prefork rewrite headers
 
 # Set working directory
 WORKDIR /var/www/html
