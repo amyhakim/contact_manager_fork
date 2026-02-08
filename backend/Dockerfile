@@ -25,7 +25,11 @@ RUN a2enmod rewrite headers proxy proxy_fcgi \
 
 # Configure PHP-FPM
 RUN sed -i 's/listen = \/run\/php\/php8.2-fpm.sock/listen = 127.0.0.1:9000/' /etc/php/8.2/fpm/pool.d/www.conf \
-    && echo "clear_env = no" >> /etc/php/8.2/fpm/pool.d/www.conf
+    && echo "clear_env = no" >> /etc/php/8.2/fpm/pool.d/www.conf \
+    && echo "pm.max_children = 20" >> /etc/php/8.2/fpm/pool.d/www.conf \
+    && echo "pm.start_servers = 3" >> /etc/php/8.2/fpm/pool.d/www.conf \
+    && echo "pm.min_spare_servers = 2" >> /etc/php/8.2/fpm/pool.d/www.conf \
+    && echo "pm.max_spare_servers = 4" >> /etc/php/8.2/fpm/pool.d/www.conf
 
 # Configure PHP error logging for Railway
 RUN echo "log_errors = On" >> /usr/local/etc/php/php.ini \
@@ -62,16 +66,17 @@ nodaemon=true
 user=root
 
 [program:php-fpm]
-command=/usr/sbin/php-fpm8.2 --nodaemonize
+command=/usr/sbin/php-fpm8.2 --nodaemonize --fpm-config /etc/php/8.2/fpm/php-fpm.conf
 autostart=true
 autorestart=true
 stderr_logfile=/dev/stderr
 stderr_logfile_maxbytes=0
 stdout_logfile=/dev/stdout
 stdout_logfile_maxbytes=0
+user=root
 
 [program:apache2]
-command=/usr/local/bin/start-apache
+command=/usr/local/bin/start-services
 autostart=true
 autorestart=true
 stderr_logfile=/dev/stderr
@@ -88,10 +93,10 @@ RUN chown -R www-data:www-data /var/www/html \
     && chmod 666 /var/www/html/requests.log
 
 # Create startup script for Railway
-RUN cat > /usr/local/bin/start-apache << 'EOF'
+RUN cat > /usr/local/bin/start-services << 'EOF'
 #!/bin/bash
 
-echo "Starting Apache for Railway..."
+echo "Starting services for Railway..."
 
 # Update port configuration if PORT is set
 if [ ! -z "$PORT" ]; then
@@ -100,15 +105,33 @@ if [ ! -z "$PORT" ]; then
     sed -i "s/:\${PORT:-80}/:$PORT/" /etc/apache2/sites-available/000-default.conf
 fi
 
+# Set proper environment for Apache
+export APACHE_RUN_USER=www-data
+export APACHE_RUN_GROUP=www-data
+export APACHE_PID_FILE=/var/run/apache2/apache2.pid
+export APACHE_RUN_DIR=/var/run/apache2
+export APACHE_LOCK_DIR=/var/lock/apache2
+export APACHE_LOG_DIR=/var/log/apache2
+
+# Create necessary directories
+mkdir -p $APACHE_RUN_DIR $APACHE_LOCK_DIR $APACHE_LOG_DIR
+
+# Start PHP-FPM first
+echo "Starting PHP-FPM..."
+/usr/sbin/php-fpm8.2 --daemonize --fpm-config /etc/php/8.2/fpm/php-fpm.conf
+
+# Wait for PHP-FPM to start
+sleep 2
+
 # Start Apache in foreground
 echo "Apache starting on port ${PORT:-80}"
 exec apache2 -DFOREGROUND
 EOF
 
-RUN chmod +x /usr/local/bin/start-apache
+RUN chmod +x /usr/local/bin/start-services
 
 # Expose port (Railway will override this)
 EXPOSE 80
 
-# Start supervisor to manage both PHP-FPM and Apache
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+# Start services directly (simpler than supervisor for this case)
+CMD ["/usr/local/bin/start-services"]
