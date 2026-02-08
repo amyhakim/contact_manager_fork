@@ -1,4 +1,4 @@
-FROM php:8.2-fpm
+FROM php:8.2-apache
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -7,8 +7,6 @@ RUN apt-get update && apt-get install -y \
     libpng-dev \
     libjpeg-dev \
     libfreetype6-dev \
-    nginx \
-    supervisor \
     && rm -rf /var/lib/apt/lists/*
 
 # Install PHP extensions
@@ -17,6 +15,9 @@ RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
 
 # Use production PHP configuration
 RUN mv "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini"
+
+# Enable Apache modules
+RUN a2enmod rewrite headers
 
 # Set working directory
 WORKDIR /var/www/html
@@ -31,159 +32,93 @@ RUN chown -R www-data:www-data /var/www/html \
     && chown www-data:www-data /var/www/html/requests.log \
     && chmod 666 /var/www/html/requests.log
 
-# Create nginx configuration with clean URLs
-RUN cat > /etc/nginx/sites-available/default << 'EOF'
-server {
-    listen 80;
-    root /var/www/html;
-    index index.php;
+# Configure Apache for Railway (dynamic port support)
+RUN sed -i 's/Listen 80/Listen ${PORT:-80}/' /etc/apache2/ports.conf
+RUN sed -i 's/:80/:${PORT:-80}/' /etc/apache2/sites-available/000-default.conf
 
-    # Configure logs for Railway - output to stdout/stderr
-    access_log /dev/stdout combined;
-    error_log /dev/stderr warn;
+# Configure Apache logging for Railway (stdout/stderr)
+RUN sed -i 's|ErrorLog .*|ErrorLog /proc/self/fd/2|' /etc/apache2/apache2.conf \
+    && sed -i 's|CustomLog .*|CustomLog /proc/self/fd/1 combined|' /etc/apache2/sites-available/000-default.conf
 
-    # CORS headers
-    add_header Access-Control-Allow-Origin "*" always;
-    add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS" always;
-    add_header Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With" always;
+# Create Apache configuration with CORS and clean URLs
+RUN cat > /etc/apache2/conf-available/api.conf << 'EOF'
+# CORS Headers for API
+Header always set Access-Control-Allow-Origin "*"
+Header always set Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+Header always set Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With"
 
-    # Handle preflight OPTIONS requests
-    if ($request_method = OPTIONS) {
-        return 200;
-    }
+# Handle preflight OPTIONS requests
+RewriteEngine On
+RewriteCond %{REQUEST_METHOD} OPTIONS
+RewriteRule ^(.*)$ $1 [R=200,L]
 
-    # Health check endpoint - don't log these for cleaner logs
-    location /health {
-        access_log off;
-        return 200 "healthy\n";
-        add_header Content-Type text/plain;
-    }
+# Clean URL rewrites for API endpoints
+RewriteRule ^api/?$ api_info.php [L]
+RewriteRule ^info/?$ api_info.php [L]
+RewriteRule ^swagger/?$ swagger.php [L]
+RewriteRule ^docs/?$ swagger.php [L]
+RewriteRule ^swagger\.json$ swagger_json.php [L]
+RewriteRule ^logs/?$ logs.php [L]
+RewriteRule ^db/?$ db_test.php [L]
+RewriteRule ^test-logs/?$ log_test.php [L]
 
-    # Clean URL rewrites for API endpoints
-    location /api { try_files $uri /api_info.php; }
-    location /info { try_files $uri /api_info.php; }
-    location /swagger { try_files $uri /swagger.php; }
-    location /docs { try_files $uri /swagger.php; }
-    location /swagger.json { try_files $uri /swagger_json.php; }
-    location /logs { try_files $uri /logs.php; }
-    location /db { try_files $uri /db_test.php; }
-    location /test-logs { try_files $uri /log_test.php; }
+# Main API endpoints (clean URLs)
+RewriteRule ^Login/?$ Login.php [L]
+RewriteRule ^Register/?$ Register.php [L]
+RewriteRule ^getContacts/?$ getContacts.php [L]
+RewriteRule ^addContact/?$ addContact.php [L]
+RewriteRule ^updateContact/?$ updateContact.php [L]
+RewriteRule ^deleteContact/?$ deleteContact.php [L]
+RewriteRule ^editContact/?$ editContact.php [L]
+RewriteRule ^searchContacts/?$ searchContacts.php [L]
 
-    # Main API endpoints (clean URLs)
-    location /Login { try_files $uri /Login.php; }
-    location /Register { try_files $uri /Register.php; }
-    location /getContacts { try_files $uri /getContacts.php; }
-    location /addContact { try_files $uri /addContact.php; }
-    location /updateContact { try_files $uri /updateContact.php; }
-    location /deleteContact { try_files $uri /deleteContact.php; }
-    location /editContact { try_files $uri /editContact.php; }
-    location /searchContacts { try_files $uri /searchContacts.php; }
-
-    # Handle direct .php access and all other requests
-    location ~ \.php$ {
-        try_files $uri =404;
-        fastcgi_pass 127.0.0.1:9000;
-        fastcgi_index index.php;
-        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-        fastcgi_param REQUEST_URI $request_uri;
-        fastcgi_param QUERY_STRING $query_string;
-        fastcgi_param REQUEST_METHOD $request_method;
-        fastcgi_param CONTENT_TYPE $content_type;
-        fastcgi_param CONTENT_LENGTH $content_length;
-        include fastcgi_params;
-    }
-
-    # Deny access to sensitive files
-    location ~ /\. { deny all; }
-    location ~ \.(env|log)$ { deny all; }
-}
+# Health check endpoint
+RewriteRule ^health/?$ - [E=no_log:1]
+RewriteCond %{REQUEST_URI} ^/health/?$
+RewriteRule . - [R=200,L,E=response:healthy]
 EOF
 
-# Configure nginx to output logs to stdout/stderr for Railway
-RUN ln -sf /dev/stdout /var/log/nginx/access.log \
-    && ln -sf /dev/stderr /var/log/nginx/error.log
+# Enable the API configuration
+RUN a2enconf api
 
-# Configure PHP-FPM to output logs to stderr for Railway
-RUN echo '[global]' > /usr/local/etc/php-fpm.d/railway.conf \
-    && echo 'error_log = /proc/self/fd/2' >> /usr/local/etc/php-fpm.d/railway.conf \
-    && echo 'log_level = notice' >> /usr/local/etc/php-fpm.d/railway.conf \
-    && echo '' >> /usr/local/etc/php-fpm.d/railway.conf \
-    && echo '[www]' >> /usr/local/etc/php-fpm.d/railway.conf \
-    && echo 'access.log = /proc/self/fd/2' >> /usr/local/etc/php-fpm.d/railway.conf \
-    && echo 'catch_workers_output = yes' >> /usr/local/etc/php-fpm.d/railway.conf \
-    && echo 'decorate_workers_output = no' >> /usr/local/etc/php-fpm.d/railway.conf
-
-# Configure PHP error logging to stderr for Railway
+# Configure PHP error logging for Railway
 RUN echo "log_errors = On" >> /usr/local/etc/php/php.ini \
     && echo "error_log = /proc/self/fd/2" >> /usr/local/etc/php/php.ini \
     && echo "display_errors = Off" >> /usr/local/etc/php/php.ini
 
-# Create supervisor configuration with stdout/stderr logging for Railway
-RUN cat > /etc/supervisor/conf.d/supervisord.conf << 'EOF'
-[supervisord]
-nodaemon=true
-silent=false
-logfile=/dev/stdout
-logfile_maxbytes=0
-
-[program:nginx]
-command=nginx -g "daemon off;"
-autostart=true
-autorestart=true
-priority=10
-stdout_logfile=/dev/stdout
-stdout_logfile_maxbytes=0
-stderr_logfile=/dev/stderr
-stderr_logfile_maxbytes=0
-
-[program:php-fpm]
-command=php-fpm --nodaemonize
-autostart=true
-autorestart=true
-priority=5
-stdout_logfile=/dev/stdout
-stdout_logfile_maxbytes=0
-stderr_logfile=/dev/stderr
-stderr_logfile_maxbytes=0
-EOF
-
 # Create startup script for Railway
-RUN cat > /start.sh << 'EOF'
+RUN cat > /usr/local/bin/start-apache << 'EOF'
 #!/bin/bash
 
-echo "Starting nginx + PHP-FPM with Supervisor for Railway..."
+echo "Starting Apache for Railway..."
 
-# Update nginx port for Railway if PORT environment variable is set
+# Update port configuration if PORT is set
 if [ ! -z "$PORT" ]; then
     echo "Railway PORT detected: $PORT"
-    sed -i "s/listen 80;/listen $PORT;/" /etc/nginx/sites-available/default
-else
-    echo "Using default port 80"
+    sed -i "s/Listen \${PORT:-80}/Listen $PORT/" /etc/apache2/ports.conf
+    sed -i "s/:\${PORT:-80}/:$PORT/" /etc/apache2/sites-available/000-default.conf
 fi
 
+# Set proper environment for Apache
+export APACHE_RUN_USER=www-data
+export APACHE_RUN_GROUP=www-data
+export APACHE_PID_FILE=/var/run/apache2/apache2.pid
+export APACHE_RUN_DIR=/var/run/apache2
+export APACHE_LOCK_DIR=/var/lock/apache2
+export APACHE_LOG_DIR=/var/log/apache2
+
 # Create necessary directories
-mkdir -p /var/log/nginx
-mkdir -p /var/run/nginx
-mkdir -p /var/log/supervisor
+mkdir -p $APACHE_RUN_DIR $APACHE_LOCK_DIR $APACHE_LOG_DIR
 
-# Ensure nginx log symlinks are correct for Railway
-ln -sf /dev/stdout /var/log/nginx/access.log
-ln -sf /dev/stderr /var/log/nginx/error.log
-
-# Set proper permissions
-chown -R www-data:www-data /var/www/html
-chmod -R 755 /var/www/html
-
-# Start supervisor which will manage both PHP-FPM and Nginx
-echo "Starting Supervisor to manage PHP-FPM and Nginx..."
-echo "All logs will be output to stdout/stderr for Railway visibility"
-exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
+# Start Apache in foreground
+echo "Apache starting on port ${PORT:-80}"
+exec apache2 -DFOREGROUND
 EOF
 
-RUN chmod +x /start.sh
+RUN chmod +x /usr/local/bin/start-apache
 
-# Expose port (Railway will override with PORT env var)
+# Expose port (Railway will override this)
 EXPOSE 80
 
-# Start both services
-CMD ["/start.sh"]
+# Start Apache
+CMD ["/usr/local/bin/start-apache"]
